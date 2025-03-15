@@ -4,6 +4,11 @@ const mysql = require('mysql2');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const app = express();
+const { Server } = require("socket.io");
+const http = require("http");
+
+const server = http.createServer(app);
+const io = new Server(server, { cors: { origin: "*" } });
 
 // Middleware
 app.use(cors());
@@ -22,6 +27,45 @@ db.connect((err) => {
   if (err) throw err;
   console.log('Connected to the MySQL database!');
 });
+
+
+
+
+
+
+// WebSocket connection event
+io.on("connection", (socket) => {
+  console.log("New client connected:", socket.id);
+
+  // User joins their own "room" based on email
+  socket.on("join", (userEmail) => {
+      socket.join(userEmail);
+      console.log(`${userEmail} joined room`);
+  });
+
+  // Handle user disconnect
+  socket.on("disconnect", () => {
+      console.log("Client disconnected:", socket.id);
+  });
+});
+
+// Function to send a real-time notification to a specific user
+const sendNotification = (userEmail, message) => {
+  io.to(userEmail).emit("newNotification", { message });
+};
+
+// Start the server
+server.listen(5001, () => {
+  console.log("WebSocket server running on port 5001");
+});
+
+// Export sendNotification so we can use it elsewhere
+module.exports = { sendNotification };
+
+
+
+
+
 
 // Routes
 
@@ -72,23 +116,29 @@ app.post('/login', (req, res) => {
 
 
 const authenticateToken = (req, res, next) => {
-  const authHeader = req.header('Authorization'); // Get token from header
+  const authHeader = req.header('Authorization'); 
+
+  console.log("Authorization Header:", authHeader); // Debugging step
 
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
       return res.status(401).json({ message: 'Access denied. No token provided.' });
   }
 
-  const token = authHeader.split(' ')[1]; // Extract token
+  const token = authHeader.split(' ')[1]; 
 
   try {
-      const decoded = jwt.verify(token, 'yourSecretKey'); // Verify token
-      req.user_id = decoded.user_id; // Attach user_id to request
+      const decoded = jwt.verify(token, 'yourSecretKey'); 
+
+      console.log("Decoded Token:", decoded); // Debugging step
+
+      req.user_id = decoded.user_id; // Ensure user_id exists in the token
+
       next();
   } catch (error) {
+      console.error("JWT Verification Error:", error); // Debugging step
       res.status(400).json({ message: 'Invalid token' });
   }
 };
-
 
 app.post('/add-project', authenticateToken, (req, res) => {
   const { name, description } = req.body;
@@ -158,6 +208,69 @@ app.get('/projects/:projectId', authenticateToken, (req, res) => {
 
       res.json(result[0]); // Send the project details
   });
+});
+
+app.get('/projects/:projectId/members', authenticateToken, (req, res) => {
+  const { projectId } = req.params;
+
+  const query = `
+      SELECT u.user_id, u.name, pm.role 
+      FROM project_members pm
+      JOIN users u ON pm.user_id = u.user_id
+      WHERE pm.project_id = ?`;
+
+  db.query(query, [projectId], (err, results) => {
+      if (err) {
+          console.error("Database error:", err);
+          return res.status(500).json({ message: 'Error fetching project members' });
+      }
+
+      res.json(results); // Send list of members
+  });
+});
+
+app.get("/users/search", (req, res) => {
+  console.log("Received request to /users/search"); // Debugging
+  const { query } = req.query;
+
+  if (!query || query.trim().length < 1) {
+    return res.json([]); // Return empty array if query is empty
+  }
+
+  const searchQuery = `SELECT email FROM users WHERE email LIKE ? LIMIT 10`;
+  db.query(searchQuery, [`%${query}%`], (err, results) => {
+    if (err) {
+      console.error("Database error:", err);
+      return res.status(500).json({ error: "Internal Server Error" });
+    }
+
+    res.json(results.map(user => user.email)); // Return email array
+  });
+});
+
+app.post("/invite", async (req, res) => {
+  const { projectId, userEmail } = req.body;
+  const senderId = req.user_id; // Assume you get this from JWT
+  
+  console.log(req.body); // Add this before line 247
+console.log(req.user_id); // Check if it's undefined
+
+  try {
+      // Insert invitation logic (if not exists)
+      db.query("INSERT INTO invitations (project_id, user_email) VALUES (?, ?)", [projectId, userEmail]);
+
+      // Insert notification into notifications table
+      db.query(
+      "INSERT INTO notifications (user_email, message, sent_by) VALUES (?, ?, ?)",
+      [userEmail, `You have been invited to project ${projectId}`, senderId]
+    );
+
+      // Send real-time notification using WebSocket
+      sendNotification(userEmail, `You have been invited to project ${projectId}`);
+  } catch (error) {
+      console.error("Error adding member:", error);
+      res.status(500).json({ message: "Error adding member" });
+  }
 });
 
 
